@@ -66,8 +66,19 @@
 /**********I2C**********/
 /* I2C3_M1 */
 &i2c3 {
-	status = "disabled";
-	clock-frequency = <100000>;
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3m1_xfer>;
+	clock-frequency = <400000>;
+
+	oled: oled@3c {
+		compatible = "solomon,ssd1306fb-i2c";
+		reg = <0x3c>;
+		solomon,width = <128>;
+		solomon,height = <64>;
+		solomon,page-offset = <0>;
+		solomon,com-invdir;
+	};
 };
 
 /**********UART**********/
