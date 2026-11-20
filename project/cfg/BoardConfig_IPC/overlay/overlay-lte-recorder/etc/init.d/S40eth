@@ -6,6 +6,14 @@ ETH_ADDR=10.5.4.2/24
 case "$1" in
     start|restart)
         printf "Starting eth0 ($ETH_ADDR): "
+        # fixed MAC per board: generated once, kept in /userdata
+        MACF=/userdata/eth_mac
+        if [ ! -s "$MACF" ]; then
+            set -- $(od -An -N5 -tu1 /dev/urandom)
+            printf '02:%02x:%02x:%02x:%02x:%02x\n' $1 $2 $3 $4 $5 > "$MACF"
+        fi
+        ip link set eth0 down
+        ip link set eth0 address "$(cat $MACF)"
         ip addr flush dev eth0
         ip addr add "$ETH_ADDR" dev eth0
         ip link set eth0 up

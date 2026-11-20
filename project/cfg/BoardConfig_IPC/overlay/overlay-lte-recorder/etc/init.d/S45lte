@@ -38,6 +38,10 @@ watch() {
             [ $fail -gt 0 ] && log "online again"
             fail=0
             echo "$(date '+%F %T') online" > "$ST"
+            # time comes from NTP (ntpd -g) once LTE is up; recording waits for /tmp/time_ok
+            if [ ! -f /tmp/time_ok ] && [ "$(date +%Y)" -ge 2025 ]; then
+                touch /tmp/time_ok; log "time synced: $(date '+%F %T')"
+            fi
         else
             fail=$((fail+1))
             log "no internet ($fail)"
