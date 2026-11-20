@@ -1,0 +1,85 @@
+#!/bin/sh
+# microSD hot-plug: mount when inserted, lazy-unmount when removed.
+# Status for other scripts / web page: /tmp/sd.status
+#   absent | ok | readonly | unknown (foreign/unreadable fs) | formatting
+MNT=/mnt/sdcard
+ST=/tmp/sd.status
+LOCK=/tmp/sd_format.lock
+PIDF=/var/run/sdcard.pid
+
+log() { logger -t sdcard "$*"; }
+setst() { [ "$(cat $ST 2>/dev/null)" = "$1" ] || { echo "$1" > "$ST"; log "state: $1"; }; }
+
+sd_dev() {
+    if [ -b /dev/mmcblk1p1 ]; then echo /dev/mmcblk1p1
+    elif [ -b /dev/mmcblk1 ]; then echo /dev/mmcblk1
+    fi
+}
+
+is_mounted() { grep -q " $MNT " /proc/mounts; }
+
+try_mount() {
+    dev=$1
+    fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
+    if [ -z "$fstype" ]; then
+        # busybox blkid has no -o: parse its output
+        fstype=$(blkid "$dev" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+    fi
+    mkdir -p "$MNT"
+    case "$fstype" in
+        vfat|"")
+            fsck.vfat -a "$dev" >/dev/null 2>&1
+            mount -t vfat -o noatime,flush,errors=remount-ro "$dev" "$MNT" 2>/dev/null ;;
+        exfat)
+            mount -t exfat -o noatime "$dev" "$MNT" 2>/dev/null ;;
+        *)
+            false ;;
+    esac
+    if is_mounted; then
+        mkdir -p "$MNT/rec"
+        if touch "$MNT/rec/.rw" 2>/dev/null; then rm -f "$MNT/rec/.rw"; setst ok
+        else setst readonly; fi
+    else
+        setst unknown
+    fi
+}
+
+loop() {
+    # keep at most ~3 s of unwritten video in RAM
+    echo 300 > /proc/sys/vm/dirty_expire_centisecs
+    echo 100 > /proc/sys/vm/dirty_writeback_centisecs
+    last=""
+    while true; do
+        if [ -f "$LOCK" ]; then
+            setst formatting
+        else
+            dev=$(sd_dev)
+            if [ -z "$dev" ]; then
+                if is_mounted; then umount -l "$MNT"; log "card removed"; fi
+                setst absent
+                last=""
+            elif ! is_mounted; then
+                # do not hammer a card that failed to mount: retry every 30 s
+                now=$(date +%s)
+                if [ -z "$last" ] || [ $((now - last)) -ge 30 ]; then
+                    last=$now
+                    try_mount "$dev"
+                fi
+            fi
+        fi
+        sleep 2
+    done
+}
+
+case "$1" in
+    start)
+        printf "Starting SD watcher: "
+        loop </dev/null >/dev/null 2>&1 &
+        echo $! > "$PIDF"; echo "OK" ;;
+    stop)
+        [ -f "$PIDF" ] && kill "$(cat $PIDF)" 2>/dev/null
+        sync; is_mounted && umount "$MNT" ;;
+    restart) "$0" stop; sleep 1; "$0" start ;;
+    status) cat "$ST" 2>/dev/null; is_mounted && df -h "$MNT" | tail -1 ;;
+esac
+exit 0
