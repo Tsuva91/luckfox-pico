@@ -9,7 +9,7 @@ OLED_DIM_MIN=10
 [ -f "$CONF" ] && . "$CONF"
 MNT=/mnt/sdcard
 OUT=/tmp/oled.txt
-DOT=$(printf '\007'); SQ=$(printf '\376'); BLK=$(printf '\333'); DEG=$(printf '\370')
+DOT=$(printf '\007'); SQ=$(printf '\376'); DEG=$(printf '\370')
 BL=$(ls -d /sys/class/backlight/* 2>/dev/null | head -n 1)
 START=$(cut -d. -f1 /proc/uptime)
 SIG_AT=0; RSRP=""; OPER=""
@@ -17,8 +17,13 @@ SIG_AT=0; RSRP=""; OPER=""
 bright() { [ -n "$BL" ] && [ "$(cat $BL/brightness)" != "$1" ] && echo "$1" > "$BL/brightness"; }
 
 line_top() {
+    # name, signal icon (byte 1..5 = level 0..4, two cells wide), clock
+    lvl=0
+    if [ -n "$RSRP" ] && grep -q online /tmp/lte.status 2>/dev/null; then
+        for lim in -115 -105 -95 -85; do [ "$RSRP" -ge $lim ] && lvl=$((lvl + 1)); done
+    fi
     if [ -f /tmp/time_ok ]; then t=$(date +%H:%M); else t="--:--"; fi
-    printf '%-15.15s %5s\n' "$DEVNAME" "$t"
+    printf "%-12.12s \\00$((lvl + 1)) %5s\n" "$DEVNAME" "$t"
 }
 
 line_rec() {
@@ -39,17 +44,13 @@ line_lte() {
     now=$(cut -d. -f1 /proc/uptime)
     if [ $((now - SIG_AT)) -ge 30 ]; then
         SIG_AT=$now
-        RSRP=$(uqmi -d /dev/cdc-wdm0 --get-signal-info 2>/dev/null | sed -n 's/.*"rsrp":\([-0-9]*\).*/\1/p')
-        OPER=$(uqmi -d /dev/cdc-wdm0 --get-serving-system 2>/dev/null | sed -n 's/.*"plmn_description":"\([^"]*\)".*/\1/p')
+        RSRP=$(uqmi -d /dev/cdc-wdm0 --get-signal-info 2>/dev/null | sed -n 's/.*"rsrp": *\([-0-9]*\).*/\1/p')
+        OPER=$(uqmi -d /dev/cdc-wdm0 --get-serving-system 2>/dev/null | sed -n 's/.*"plmn_description": *"\([^"]*\)".*/\1/p')
     fi
     if ! grep -q online /tmp/lte.status 2>/dev/null; then
         printf '!LTE %-4s NO INTERNET\n' "${RSRP:---}"; return
     fi
-    b=""
-    if [ -n "$RSRP" ]; then
-        for lim in -115 -105 -95 -85; do [ "$RSRP" -ge $lim ] && b="$b$BLK"; done
-    fi
-    printf 'LTE%4sdBm %-5.5s %s\n' "${RSRP:---}" "$OPER" "$b"
+    printf 'LTE %4sdBm     %-5.5s\n' "${RSRP:---}" "$OPER"
 }
 
 line_vpn() {
@@ -99,7 +100,8 @@ line_sys() {
 
 while true; do
     if ping -c 1 -W 1 "$CAM_IP" >/dev/null 2>&1; then CAM=ok; else CAM=down; fi
-    { line_top; line_rec; line_lte; line_vpn; line_sd; line_cam; line_nas; line_sys; } > $OUT.new
+    line_lte > /tmp/oled.lte
+    { line_top; line_rec; cat /tmp/oled.lte; line_vpn; line_sd; line_cam; line_nas; line_sys; } > $OUT.new
     mv $OUT.new $OUT
     oledtext < $OUT
     # full brightness for the first minutes and while something is wrong, then dim
