@@ -20,28 +20,23 @@ is_mounted() { grep -q " $MNT " /proc/mounts; }
 
 try_mount() {
     dev=$1
-    fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
-    if [ -z "$fstype" ]; then
-        # busybox blkid has no -o: parse its output
-        fstype=$(blkid "$dev" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
-    fi
     mkdir -p "$MNT"
-    case "$fstype" in
-        vfat|"")
-            fsck.vfat -a "$dev" >/dev/null 2>&1
-            mount -t vfat -o noatime,flush,errors=remount-ro "$dev" "$MNT" 2>/dev/null ;;
-        exfat)
-            mount -t exfat -o noatime "$dev" "$MNT" 2>/dev/null ;;
-        *)
-            false ;;
-    esac
+    # busybox blkid does not report the fs type, so just try FAT32 first, then exFAT
+    fsck.vfat -a "$dev" >/dev/null 2>&1
+    mount -t vfat -o noatime,flush,errors=remount-ro "$dev" "$MNT" 2>/dev/null \
+        || mount -t exfat -o noatime "$dev" "$MNT" 2>/dev/null
     if is_mounted; then
-        mkdir -p "$MNT/rec"
-        if touch "$MNT/rec/.rw" 2>/dev/null; then rm -f "$MNT/rec/.rw"; setst ok
-        else setst readonly; fi
+        log "mounted $dev ($(awk -v m="$MNT" '$2==m{print $3}' /proc/mounts))"
+        check_rw
     else
         setst unknown
     fi
+}
+
+check_rw() {
+    mkdir -p "$MNT/rec" 2>/dev/null
+    if touch "$MNT/rec/.rw" 2>/dev/null; then rm -f "$MNT/rec/.rw"; setst ok
+    else setst readonly; fi
 }
 
 loop() {
@@ -52,6 +47,7 @@ loop() {
     while true; do
         if [ -f "$LOCK" ]; then
             setst formatting
+            last=""
         else
             dev=$(sd_dev)
             if [ -z "$dev" ]; then
@@ -65,6 +61,9 @@ loop() {
                     last=$now
                     try_mount "$dev"
                 fi
+            else
+                # mounted by someone else or status lost: verify once
+                case "$(cat $ST 2>/dev/null)" in ok|readonly) ;; *) check_rw ;; esac
             fi
         fi
         sleep 2

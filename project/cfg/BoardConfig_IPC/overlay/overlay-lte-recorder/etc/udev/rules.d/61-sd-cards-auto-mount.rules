@@ -1,0 +1,1 @@
+# disabled: microSD is handled by /etc/init.d/S30sdcard
