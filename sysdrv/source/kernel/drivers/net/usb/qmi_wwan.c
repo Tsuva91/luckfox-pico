@@ -1284,6 +1284,7 @@ static const struct usb_device_id products[] = {
 	{QMI_QUIRK_SET_DTR(0x1199, 0x9071, 10)},/* Sierra Wireless MC74xx */
 	{QMI_QUIRK_SET_DTR(0x1199, 0x9079, 8)},	/* Sierra Wireless EM74xx */
 	{QMI_QUIRK_SET_DTR(0x1199, 0x9079, 10)},/* Sierra Wireless EM74xx */
+{QMI_QUIRK_SET_DTR(0x1199, 0x9075, 8)},/* Sierra EM7455 Fujitsu, QMI composition 6 */
 	{QMI_QUIRK_SET_DTR(0x1199, 0x907b, 8)},	/* Sierra Wireless EM74xx */
 	{QMI_QUIRK_SET_DTR(0x1199, 0x907b, 10)},/* Sierra Wireless EM74xx */
 	{QMI_QUIRK_SET_DTR(0x1199, 0x9091, 8)},	/* Sierra Wireless EM7565 */
