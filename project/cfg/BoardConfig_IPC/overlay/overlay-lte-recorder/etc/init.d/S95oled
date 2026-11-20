@@ -1,0 +1,15 @@
+#!/bin/sh
+# Status screen on the SSD1306 OLED (skipped if no display is connected)
+PIDF=/var/run/oled.pid
+case "$1" in
+    start)
+        [ -c /dev/fb0 ] || { echo "OLED: no display"; exit 0; }
+        printf "Starting OLED status: "
+        /usr/bin/oled.sh </dev/null >/dev/null 2>&1 &
+        echo $! > "$PIDF"; echo "OK" ;;
+    stop)
+        [ -f "$PIDF" ] && kill "$(cat $PIDF)" 2>/dev/null
+        [ -c /dev/fb0 ] && oledtext < /dev/null ;;
+    restart) "$0" stop; sleep 1; "$0" start ;;
+esac
+exit 0
