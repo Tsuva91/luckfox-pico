@@ -34,6 +34,7 @@
 	cap-mmc-highspeed;
 	cap-sd-highspeed;
 	disable-wp;
+	broken-cd;
 	
 	//sdio
 	no-1-8-v;
