@@ -1,0 +1,15 @@
+#!/bin/sh
+# Ethernet to the camera: static address, no gateway (internet goes via LTE).
+CONF=/userdata/recorder.conf
+ETH_ADDR=10.5.4.2/24
+[ -f "$CONF" ] && . "$CONF"
+case "$1" in
+    start|restart)
+        printf "Starting eth0 ($ETH_ADDR): "
+        ip addr flush dev eth0
+        ip addr add "$ETH_ADDR" dev eth0
+        ip link set eth0 up
+        echo "OK" ;;
+    stop) ip addr flush dev eth0; ip link set eth0 down ;;
+esac
+exit 0

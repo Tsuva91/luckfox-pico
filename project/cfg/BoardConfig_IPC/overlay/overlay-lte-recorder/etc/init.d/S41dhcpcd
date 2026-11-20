@@ -1,0 +1,3 @@
+#!/bin/sh
+# disabled for LTE recorder (S40eth/S45lte manage network)
+exit 0

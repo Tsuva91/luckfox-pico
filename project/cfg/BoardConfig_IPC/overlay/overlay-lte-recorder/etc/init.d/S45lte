@@ -1,0 +1,72 @@
+#!/bin/sh
+# LTE via Sierra EM7455 (QMI) - connect at boot and keep the link alive.
+# Settings: /userdata/recorder.conf (APN=...), status: /tmp/lte.status
+CONF=/userdata/recorder.conf
+APN=internet
+[ -f "$CONF" ] && . "$CONF"
+DEV=/dev/cdc-wdm0
+IF=wwan0
+ST=/tmp/lte.status
+PIDF=/var/run/lte.pid
+
+log() { logger -t lte "$*"; echo "$(date '+%F %T') $*" > "$ST"; }
+
+link_up() {
+    i=0
+    while [ ! -c "$DEV" ] && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
+    [ -c "$DEV" ] || { log "modem not found"; return 1; }
+    ip link set "$IF" down
+    echo Y > "/sys/class/net/$IF/qmi/raw_ip"
+    ip link set "$IF" up
+    uqmi -d "$DEV" --stop-network 0xffffffff --autoconnect >/dev/null 2>&1
+    uqmi -d "$DEV" --start-network "$APN" --autoconnect >/dev/null 2>&1
+    [ -f "/var/run/udhcpc.$IF.pid" ] && kill "$(cat /var/run/udhcpc.$IF.pid)" 2>/dev/null
+    udhcpc -i "$IF" -b -t 10 -p "/var/run/udhcpc.$IF.pid" >/dev/null 2>&1
+    log "connecting (APN $APN)"
+}
+
+online() {
+    ping -I "$IF" -c 2 -W 5 1.1.1.1 >/dev/null 2>&1 || ping -I "$IF" -c 2 -W 5 8.8.8.8 >/dev/null 2>&1
+}
+
+watch() {
+    fail=0
+    link_up
+    sleep 20
+    while true; do
+        if online; then
+            [ $fail -gt 0 ] && log "online again"
+            fail=0
+            echo "$(date '+%F %T') online" > "$ST"
+        else
+            fail=$((fail+1))
+            log "no internet ($fail)"
+            case $fail in
+                3) link_up ;;
+                6) log "modem reset"
+                   uqmi -d "$DEV" --set-device-operating-mode offline >/dev/null 2>&1
+                   uqmi -d "$DEV" --set-device-operating-mode reset >/dev/null 2>&1
+                   sleep 45; link_up ;;
+                10) fail=0; link_up ;;
+            esac
+        fi
+        sleep 60
+    done
+}
+
+case "$1" in
+    start)
+        printf "Starting LTE: "
+        watch </dev/null >/dev/null 2>&1 &
+        echo $! > "$PIDF"; echo "OK" ;;
+    stop)
+        printf "Stopping LTE: "
+        [ -f "$PIDF" ] && kill "$(cat $PIDF)" 2>/dev/null
+        [ -f "/var/run/udhcpc.$IF.pid" ] && kill "$(cat /var/run/udhcpc.$IF.pid)" 2>/dev/null
+        uqmi -d "$DEV" --stop-network 0xffffffff --autoconnect >/dev/null 2>&1
+        echo "OK" ;;
+    restart) "$0" stop; sleep 2; "$0" start ;;
+    status) cat "$ST" 2>/dev/null; uqmi -d "$DEV" --get-signal-info ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+exit 0
