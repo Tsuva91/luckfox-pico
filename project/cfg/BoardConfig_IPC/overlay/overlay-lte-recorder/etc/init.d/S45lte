@@ -29,6 +29,21 @@ online() {
     ping -I "$IF" -c 2 -W 5 1.1.1.1 >/dev/null 2>&1 || ping -I "$IF" -c 2 -W 5 8.8.8.8 >/dev/null 2>&1
 }
 
+sync_time() {
+    # 1) NTP one-shot (ntpd started at boot had no network/DNS yet)
+    /etc/init.d/S49ntp stop >/dev/null 2>&1
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 25 ntpd -gq >/dev/null 2>&1
+    fi
+    # 2) fallback: Date header over plain HTTP (works even if UDP 123 is blocked)
+    if [ "$(date +%Y)" -lt 2025 ]; then
+        d=$(curl -sI -m 10 http://www.google.com | sed -n 's/^[Dd]ate: //p' | tr -d '\r')
+        [ -n "$d" ] && date -u -D '%a, %d %b %Y %H:%M:%S GMT' -s "$d" >/dev/null 2>&1
+        [ "$(date +%Y)" -ge 2025 ] && log "time set from HTTP"
+    fi
+    /etc/init.d/S49ntp start >/dev/null 2>&1
+}
+
 watch() {
     fail=0
     link_up
@@ -38,9 +53,12 @@ watch() {
             [ $fail -gt 0 ] && log "online again"
             fail=0
             echo "$(date '+%F %T') online" > "$ST"
-            # time comes from NTP (ntpd -g) once LTE is up; recording waits for /tmp/time_ok
-            if [ ! -f /tmp/time_ok ] && [ "$(date +%Y)" -ge 2025 ]; then
-                touch /tmp/time_ok; log "time synced: $(date '+%F %T')"
+            # set the clock once LTE is up; recording waits for /tmp/time_ok
+            if [ ! -f /tmp/time_ok ]; then
+                [ "$(date +%Y)" -lt 2025 ] && sync_time
+                if [ "$(date +%Y)" -ge 2025 ]; then
+                    touch /tmp/time_ok; log "time synced: $(date '+%F %T')"
+                fi
             fi
         else
             fail=$((fail+1))
