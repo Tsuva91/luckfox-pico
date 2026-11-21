@@ -21,8 +21,9 @@ is_mounted() { grep -q " $MNT " /proc/mounts; }
 try_mount() {
     dev=$1
     mkdir -p "$MNT"
-    # busybox blkid does not report the fs type, so just try FAT32 first, then exFAT
-    fsck.vfat -a "$dev" >/dev/null 2>&1
+    # busybox blkid does not report the fs type, so just try FAT32 first, then exFAT.
+    # No fsck: on 64+ GB cards it needs more RAM than the board has (OOM at boot).
+    # flush + errors=remount-ro keep the card usable; a damaged card shows "readonly".
     mount -t vfat -o noatime,flush,errors=remount-ro "$dev" "$MNT" 2>/dev/null \
         || mount -t exfat -o noatime "$dev" "$MNT" 2>/dev/null
     if is_mounted; then

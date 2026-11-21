@@ -12,7 +12,6 @@ OUT=/tmp/oled.txt
 DOT=$(printf '\007'); SQ=$(printf '\376'); DEG=$(printf '\370')
 BL=$(ls -d /sys/class/backlight/* 2>/dev/null | head -n 1)
 START=$(cut -d. -f1 /proc/uptime)
-SIG_AT=0; RSRP=""; OPER=""
 
 bright() { [ -n "$BL" ] && [ "$(cat $BL/brightness)" != "$1" ] && echo "$1" > "$BL/brightness"; }
 
@@ -41,16 +40,14 @@ line_rec() {
 }
 
 line_lte() {
-    now=$(cut -d. -f1 /proc/uptime)
-    if [ $((now - SIG_AT)) -ge 30 ]; then
-        SIG_AT=$now
-        RSRP=$(uqmi -d /dev/cdc-wdm0 --get-signal-info 2>/dev/null | sed -n 's/.*"rsrp": *\([-0-9]*\).*/\1/p')
-        OPER=$(uqmi -d /dev/cdc-wdm0 --get-serving-system 2>/dev/null | sed -n 's/.*"plmn_description": *"\([^"]*\)".*/\1/p')
-    fi
+    # signal is read once a minute by S45lte; never talk to the modem from here
+    RSRP=""; OPER=""; BAND=""
+    [ -f /tmp/lte.signal ] && read RSRP RSRQ SNR BAND OPER < /tmp/lte.signal
+    [ "$RSRP" = "-" ] && RSRP=""
     if ! grep -q online /tmp/lte.status 2>/dev/null; then
         printf '!LTE %-4s NO INTERNET\n' "${RSRP:---}"; return
     fi
-    printf 'LTE %4sdBm     %-5.5s\n' "${RSRP:---}" "$OPER"
+    printf 'LTE%4sdBm %-3.3s %-5.5s\n' "${RSRP:---}" "${BAND#-}" "$OPER"
 }
 
 line_vpn() {

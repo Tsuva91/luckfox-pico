@@ -1,41 +1,94 @@
 #!/bin/sh
 # LTE via Sierra EM7455 (QMI) - connect at boot and keep the link alive.
-# Settings: /userdata/recorder.conf (APN=...), status: /tmp/lte.status
+# Settings: /userdata/recorder.conf
+#   APN=internet          operator APN
+#   PROBE_MIN=60          speed probe every N minutes (0 = off), ~0.5 MB each
+#   AT_DEV=/dev/ttyUSB2   modem AT port (used only to read the LTE band)
+# Status files:
+#   /tmp/lte.status   "<time> online" / last event
+#   /tmp/lte.ready    exists while the modem is in QMI mode and answering
+#   /tmp/lte.signal   "RSRP RSRQ SNR BAND OPERATOR" (read by the OLED and web page)
+#   /tmp/lte.log      one line per minute: signal, band, traffic, probes (last 24 h)
 CONF=/userdata/recorder.conf
 APN=internet
+PROBE_MIN=60
+AT_DEV=/dev/ttyUSB2
 [ -f "$CONF" ] && . "$CONF"
 DEV=/dev/cdc-wdm0
 IF=wwan0
 ST=/tmp/lte.status
+SIG=/tmp/lte.signal
+LOG=/tmp/lte.log
 PIDF=/var/run/lte.pid
+PROBE_URL="https://speed.cloudflare.com/__down?bytes=500000"
 
 log() { logger -t lte "$*"; echo "$(date '+%F %T') $*" > "$ST"; }
 
-link_up() {
+# run a command, kill it after N seconds (busybox here has no "timeout")
+run_to() {
+    secs=$1; shift
+    "$@" &
+    p=$!; i=0
+    while kill -0 $p 2>/dev/null && [ $i -lt "$secs" ]; do sleep 1; i=$((i + 1)); done
+    kill $p 2>/dev/null
+    wait $p
+}
+
+q() { run_to 15 uqmi -d "$DEV" "$@" 2>/dev/null; }
+
+# A new modem may arrive in MBIM mode (Windows default): switch it to QMI once.
+ensure_qmi() {
     i=0
-    while [ ! -c "$DEV" ] && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
+    while [ ! -c "$DEV" ] && [ $i -lt 60 ]; do sleep 1; i=$((i + 1)); done
     [ -c "$DEV" ] || { log "modem not found"; return 1; }
+    drv=$(basename "$(readlink /sys/class/net/$IF/device/driver 2>/dev/null)")
+    if [ "$drv" = cdc_mbim ]; then
+        log "modem in MBIM mode, switching to QMI"
+        run_to 40 qmicli -p -d "$DEV" --device-open-mbim --dms-swi-set-usb-composition=6
+        run_to 20 qmicli -p -d "$DEV" --device-open-mbim --dms-set-operating-mode=offline
+        run_to 20 qmicli -p -d "$DEV" --device-open-mbim --dms-set-operating-mode=reset
+        killall qmi-proxy mbim-proxy 2>/dev/null
+        sleep 60
+        return 1
+    fi
+    return 0
+}
+
+link_up() {
+    rm -f /tmp/lte.ready
+    ensure_qmi || return 1
     ip link set "$IF" down
     echo Y > "/sys/class/net/$IF/qmi/raw_ip"
     ip link set "$IF" up
-    uqmi -d "$DEV" --stop-network 0xffffffff --autoconnect >/dev/null 2>&1
-    uqmi -d "$DEV" --start-network "$APN" --autoconnect >/dev/null 2>&1
+    q --stop-network 0xffffffff --autoconnect >/dev/null
+    q --start-network "$APN" --autoconnect >/dev/null
     [ -f "/var/run/udhcpc.$IF.pid" ] && kill "$(cat /var/run/udhcpc.$IF.pid)" 2>/dev/null
     udhcpc -i "$IF" -b -t 10 -p "/var/run/udhcpc.$IF.pid" >/dev/null 2>&1
+    touch /tmp/lte.ready
     log "connecting (APN $APN)"
+}
+
+modem_reset() {
+    log "modem reset"
+    rm -f /tmp/lte.ready
+    q --set-device-operating-mode offline >/dev/null
+    q --set-device-operating-mode reset >/dev/null
+    sleep 45
+    link_up
 }
 
 online() {
     ping -I "$IF" -c 2 -W 5 1.1.1.1 >/dev/null 2>&1 || ping -I "$IF" -c 2 -W 5 8.8.8.8 >/dev/null 2>&1
 }
 
+# operator DNS returns IPv6-only answers for some names: keep a public resolver too
+dns_fallback() {
+    grep -q '^nameserver 1.1.1.1' /etc/resolv.conf 2>/dev/null || echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+}
+
 sync_time() {
-    # 1) NTP one-shot (ntpd started at boot had no network/DNS yet)
     /etc/init.d/S49ntp stop >/dev/null 2>&1
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 25 ntpd -gq >/dev/null 2>&1
-    fi
-    # 2) fallback: Date header over plain HTTP (works even if UDP 123 is blocked)
+    run_to 25 ntpd -gq >/dev/null 2>&1
     if [ "$(date +%Y)" -lt 2025 ]; then
         d=$(curl -sI -m 10 http://www.google.com | sed -n 's/^[Dd]ate: //p' | tr -d '\r')
         [ -n "$d" ] && date -u -D '%a, %d %b %Y %H:%M:%S GMT' -s "$d" >/dev/null 2>&1
@@ -44,33 +97,79 @@ sync_time() {
     /etc/init.d/S49ntp start >/dev/null 2>&1
 }
 
+band() {
+    [ -c "$AT_DEV" ] || { echo "-"; return; }
+    stty -F "$AT_DEV" 115200 raw -echo 2>/dev/null
+    cat "$AT_DEV" > /tmp/at.out 2>/dev/null &
+    p=$!
+    printf 'AT!GSTATUS?\r' > "$AT_DEV"
+    sleep 2
+    kill $p 2>/dev/null
+    b=$(sed -n 's/.*LTE band:[[:space:]]*\(B[0-9]*\).*/\1/p' /tmp/at.out | head -n 1)
+    echo "${b:--}"
+}
+
+# read signal once a minute; everything else (OLED, web page) reads the cache
+read_signal() {
+    s=$(q --get-signal-info | tr -d '\n\t ')
+    o=$(q --get-serving-system | tr -d '\n\t ')
+    rsrp=$(echo "$s" | sed -n 's/.*"rsrp":\([-0-9]*\).*/\1/p')
+    rsrq=$(echo "$s" | sed -n 's/.*"rsrq":\([-0-9.]*\).*/\1/p')
+    snr=$(echo "$s" | sed -n 's/.*"snr":\([-0-9.]*\).*/\1/p')
+    oper=$(echo "$o" | sed -n 's/.*"plmn_description":"\([^"]*\)".*/\1/p')
+    bnd=$(band)
+    echo "${rsrp:--} ${rsrq:--} ${snr:--} $bnd ${oper:--}" > $SIG.new && mv $SIG.new $SIG
+}
+
+# download 0.5 MB and return speed in kbit/s
+probe() {
+    v=$(curl -4 -k -s -m 30 -o /dev/null -w '%{speed_download}' "$PROBE_URL" 2>/dev/null)
+    awk -v b="${v:-0}" 'BEGIN{printf "%d", b * 8 / 1000}'
+}
+
 watch() {
-    fail=0
+    fail=0; slow=0; n=0
     link_up
     sleep 20
     while true; do
+        n=$((n + 1))
         if online; then
             [ $fail -gt 0 ] && log "online again"
             fail=0
             echo "$(date '+%F %T') online" > "$ST"
-            # set the clock once LTE is up; recording waits for /tmp/time_ok
+            dns_fallback
             if [ ! -f /tmp/time_ok ]; then
                 [ "$(date +%Y)" -lt 2025 ] && sync_time
                 if [ "$(date +%Y)" -ge 2025 ]; then
                     touch /tmp/time_ok; log "time synced: $(date '+%F %T')"
                 fi
             fi
+            # "online but nothing passes": 3 slow probes in a row -> reconnect
+            pr=""
+            if [ "$PROBE_MIN" -gt 0 ] && [ $((n % PROBE_MIN)) -eq 0 ]; then
+                pr=$(probe)
+                if [ "$pr" -lt 300 ]; then
+                    slow=$((slow + 1)); logger -t lte "slow probe $pr kbit/s ($slow)"
+                    [ $slow -ge 3 ] && { slow=0; modem_reset; }
+                else
+                    slow=0
+                fi
+            fi
         else
-            fail=$((fail+1))
+            fail=$((fail + 1))
             log "no internet ($fail)"
             case $fail in
                 3) link_up ;;
-                6) log "modem reset"
-                   uqmi -d "$DEV" --set-device-operating-mode offline >/dev/null 2>&1
-                   uqmi -d "$DEV" --set-device-operating-mode reset >/dev/null 2>&1
-                   sleep 45; link_up ;;
+                6) modem_reset ;;
                 10) fail=0; link_up ;;
             esac
+        fi
+        if [ -f /tmp/lte.ready ]; then
+            read_signal
+            rx=$(cat /sys/class/net/$IF/statistics/rx_bytes 2>/dev/null)
+            tx=$(cat /sys/class/net/$IF/statistics/tx_bytes 2>/dev/null)
+            echo "$(date '+%F %H:%M') $(cat $SIG) rx=$rx tx=$tx${pr:+ probe=${pr}kbit}" >> $LOG
+            [ "$(wc -l < $LOG)" -gt 1500 ] && { tail -n 1440 $LOG > $LOG.new; mv $LOG.new $LOG; }
         fi
         sleep 60
     done
@@ -85,10 +184,11 @@ case "$1" in
         printf "Stopping LTE: "
         [ -f "$PIDF" ] && kill "$(cat $PIDF)" 2>/dev/null
         [ -f "/var/run/udhcpc.$IF.pid" ] && kill "$(cat /var/run/udhcpc.$IF.pid)" 2>/dev/null
-        uqmi -d "$DEV" --stop-network 0xffffffff --autoconnect >/dev/null 2>&1
+        [ -f /tmp/lte.ready ] && q --stop-network 0xffffffff --autoconnect >/dev/null
+        rm -f /tmp/lte.ready
         echo "OK" ;;
     restart) "$0" stop; sleep 2; "$0" start ;;
-    status) cat "$ST" 2>/dev/null; uqmi -d "$DEV" --get-signal-info ;;
+    status) cat "$ST" 2>/dev/null; cat "$SIG" 2>/dev/null; tail -n 5 "$LOG" 2>/dev/null ;;
     *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac
 exit 0
