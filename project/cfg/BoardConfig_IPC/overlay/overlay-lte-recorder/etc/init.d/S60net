@@ -1,0 +1,41 @@
+#!/bin/sh
+# 1) Camera web/RTSP through the VPN:  http://<board VPN IP>:8080  -> camera :80
+#    (live view websocket 7681 and RTSP 554 are forwarded on the same ports)
+# 2) Nothing may connect to the board from the LTE side.
+CONF=/userdata/recorder.conf
+CAM_IP=10.5.4.10
+CAM_WEB_PORT=8080
+CAM_FWD_PORTS="7681 554"
+[ -f "$CONF" ] && . "$CONF"
+
+start() {
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    # camera forwarding (only from the VPN)
+    iptables -t nat -N CAMFWD 2>/dev/null; iptables -t nat -F CAMFWD
+    iptables -t nat -C PREROUTING -j CAMFWD 2>/dev/null || iptables -t nat -A PREROUTING -j CAMFWD
+    iptables -t nat -A CAMFWD -i wg0 -p tcp --dport "$CAM_WEB_PORT" -j DNAT --to-destination "$CAM_IP:80"
+    for p in $CAM_FWD_PORTS; do
+        iptables -t nat -A CAMFWD -i wg0 -p tcp --dport "$p" -j DNAT --to-destination "$CAM_IP:$p"
+    done
+    # the camera has no gateway: make replies come back through the board
+    iptables -t nat -C POSTROUTING -o eth0 -d "$CAM_IP" -j MASQUERADE 2>/dev/null \
+        || iptables -t nat -A POSTROUTING -o eth0 -d "$CAM_IP" -j MASQUERADE
+    # LTE side: only replies to our own connections
+    iptables -N LTEIN 2>/dev/null; iptables -F LTEIN
+    iptables -C INPUT -i wwan0 -j LTEIN 2>/dev/null || iptables -A INPUT -i wwan0 -j LTEIN
+    if iptables -A LTEIN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null \
+       || iptables -A LTEIN -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+        iptables -A LTEIN -j DROP
+        iptables -C FORWARD -i wwan0 -j DROP 2>/dev/null || iptables -A FORWARD -i wwan0 -j DROP
+        echo "firewall on"
+    else
+        logger -t net "conntrack match missing - LTE firewall NOT enabled"
+        echo "firewall skipped (no conntrack)"
+    fi
+}
+
+case "$1" in
+    start|restart) printf "Network rules: "; start ;;
+    stop) iptables -t nat -F CAMFWD 2>/dev/null; iptables -F LTEIN 2>/dev/null ;;
+esac
+exit 0

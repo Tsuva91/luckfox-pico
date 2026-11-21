@@ -1,0 +1,65 @@
+#!/bin/sh
+# WireGuard client. Put the config from wg-easy into /userdata/wg0.conf - that's all.
+# Full-tunnel routes (0.0.0.0/0) are ignored on purpose: only the VPN subnet
+# (and other AllowedIPs) go through the tunnel, the rest stays on LTE.
+WGC=/userdata/wg0.conf
+IF=wg0
+PIDF=/var/run/wg.pid
+log() { logger -t wg "$*"; }
+
+field() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$WGC" | tr -d '\r'; }
+
+up() {
+    ip link del $IF 2>/dev/null
+    ip link add $IF type wireguard || { log "no wireguard support"; return 1; }
+    grep -v -i -E '^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=' "$WGC" | tr -d '\r' > /tmp/wg0.strip
+    wg setconf $IF /tmp/wg0.strip || { log "bad config $WGC"; return 1; }
+    for a in $(field Address | tr ',' ' '); do
+        case $a in *:*) continue ;; */*) ;; *) a=$a/32 ;; esac
+        ip addr add "$a" dev $IF
+    done
+    mtu=$(field MTU); ip link set $IF mtu "${mtu:-1380}" up
+    for net in $(field AllowedIPs | tr ',' ' '); do
+        case $net in 0.0.0.0/0|*:*) continue ;; esac
+        ip route replace "$net" dev $IF
+    done
+    log "tunnel up: $(field Address)"
+}
+
+age() {
+    hs=$(wg show $IF latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -n 1)
+    [ -n "$hs" ] && [ "$hs" -gt 0 ] && echo $(( $(date +%s) - hs )) || echo 99999
+}
+
+watch() {
+    bad=0
+    until up; do sleep 60; done
+    while true; do
+        sleep 60
+        grep -q online /tmp/lte.status 2>/dev/null || continue
+        if [ "$(age)" -gt 180 ]; then
+            bad=$((bad + 1))
+            # re-resolve the endpoint (DDNS name may point to a new address)
+            ep=$(field Endpoint | head -n 1); pk=$(field PublicKey | head -n 1)
+            [ -n "$ep" ] && [ -n "$pk" ] && wg set $IF peer "$pk" endpoint "$ep" 2>/dev/null
+            [ $bad -ge 10 ] && { log "no handshake for 10 min, rebuilding"; bad=0; up; }
+        else
+            [ $bad -gt 0 ] && log "handshake ok"
+            bad=0
+        fi
+    done
+}
+
+case "$1" in
+    start)
+        [ -f "$WGC" ] || { echo "WireGuard: $WGC not found, skipped"; exit 0; }
+        printf "Starting WireGuard: "
+        watch </dev/null >/dev/null 2>&1 &
+        echo $! > $PIDF; echo "OK" ;;
+    stop)
+        [ -f $PIDF ] && kill "$(cat $PIDF)" 2>/dev/null
+        ip link del $IF 2>/dev/null ;;
+    restart) "$0" stop; sleep 1; "$0" start ;;
+    status) wg show $IF 2>/dev/null || echo "not running" ;;
+esac
+exit 0

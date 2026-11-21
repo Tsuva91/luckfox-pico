@@ -1,0 +1,32 @@
+#!/bin/sh
+# Text status for the UART/SSH console. "status -j" prints JSON (same as the web page).
+. /usr/lib/recstat.sh
+collect
+[ "$1" = "-j" ] && exec /www/cgi-bin/status.cgi --raw
+
+hm() { printf '%dd %02d:%02d' $(($1 / 86400)) $(($1 / 3600 % 24)) $(($1 / 60 % 60)); }
+gb() { awk -v k="$1" 'BEGIN{printf "%.1f", k / 1048576}'; }
+mb() { awk -v b="$1" 'BEGIN{printf "%.1f", b / 1048576}'; }
+
+echo "== $S_NAME   $S_TIME$([ $S_TIME_OK = 1 ] || echo '  (clock not synced)')"
+echo "   firmware $S_VER, up $(hm $S_UP), ${S_TEMP}C, load $S_LOAD, free RAM ${S_MEM} MB"
+if [ "$S_REC" = rec ]; then
+    a=$((NOW - S_REC_SINCE)); echo "REC  recording, current file $((a / 60)):$(printf %02d $((a % 60))), segments ${SEGMENT_MIN} min"
+else
+    echo "REC  STOPPED: $S_REC_WHY"
+fi
+echo "LTE  $S_LTE  ${S_OPER:--} ${S_BAND:--}  RSRP ${S_RSRP:--} dBm  RSRQ ${S_RSRQ:--} dB  IP ${S_LTE_IP:--}"
+echo "     traffic since boot: in $(mb $S_RX) MB, out $(mb $S_TX) MB"
+case $S_SD in
+    ok|readonly) echo "SD   $S_SD  $(gb $S_SD_USED) / $(gb $S_SD_TOTAL) GB used (${S_SD_PCT}%)" ;;
+    *) echo "SD   $S_SD" ;;
+esac
+[ $S_CAM = 1 ] && echo "CAM  $CAM_IP reachable" || echo "CAM  $CAM_IP NOT reachable"
+if [ -z "$S_VPN_IP" ]; then echo "VPN  not configured (/userdata/wg0.conf missing)"
+elif [ $S_VPN_HS -ge 0 ] && [ $S_VPN_HS -lt 180 ]; then echo "VPN  up  $S_VPN_IP  (handshake ${S_VPN_HS}s ago)"
+else echo "VPN  DOWN  $S_VPN_IP  (no handshake)"; fi
+case $S_NAS in
+    ok) echo "NAS  last sync $(date -d @$S_NAS_AT '+%F %H:%M')" ;;
+    fail) echo "NAS  sync FAILED $(date -d @$S_NAS_AT '+%F %H:%M')" ;;
+    *) echo "NAS  not configured" ;;
+esac

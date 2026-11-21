@@ -1,0 +1,23 @@
+#!/bin/sh
+# Status page (busybox httpd). Login: WEB_USER / WEB_PASS from /userdata/recorder.conf
+# (default admin / admin - change it!). Only LAN and VPN addresses may connect.
+CONF=/userdata/recorder.conf
+WEB_USER=admin
+WEB_PASS=admin
+WEB_ALLOW="10.5.4.0/24 10.8.0.0/16 10.10.0.0/16 192.168.0.0/16"
+[ -f "$CONF" ] && . "$CONF"
+case "$1" in
+    start)
+        printf "Starting web status: "
+        {
+            echo "A:127.0.0.1"
+            for n in $WEB_ALLOW; do echo "A:$n"; done
+            echo "D:*"
+            echo "/:$WEB_USER:$(httpd -m "$WEB_PASS")"
+        } > /tmp/httpd.conf
+        chmod 600 /tmp/httpd.conf
+        httpd -p 80 -h /www -c /tmp/httpd.conf && echo "OK" ;;
+    stop) killall httpd 2>/dev/null ;;
+    restart) "$0" stop; sleep 1; "$0" start ;;
+esac
+exit 0
